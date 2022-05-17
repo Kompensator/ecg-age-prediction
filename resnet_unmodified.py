@@ -1,6 +1,4 @@
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 
 
@@ -78,34 +76,6 @@ class ResBlock1d(nn.Module):
         return x, y
 
 
-class Mlp(nn.Module):
-    """ A MLP that consists of two dense layers, its purpose is to process
-        tabular data (Ex age, sex) to be integrated into a CNN """
-    def __init__(self, in_channels=2, hidden_size=32, out_channels=8, dropout=0.2):
-        super(Mlp, self).__init__()
-        self.fc1 = nn.Linear(in_channels, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, out_channels)
-        self.act_fn = F.gelu
-        self.dropout = nn.Dropout(p=dropout)
-
-        self._init_weights()
-
-    def _init_weights(self):
-        nn.init.xavier_uniform_(self.fc1.weight)
-        nn.init.xavier_uniform_(self.fc2.weight)
-        nn.init.normal_(self.fc1.bias, std=1e-6)
-        nn.init.normal_(self.fc2.bias, std=1e-6)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act_fn(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-        x = self.act_fn(x)
-        x = self.dropout(x)
-        return x
-
-
 class ResNet1d(nn.Module):
     """Residual network for unidimensional signals.
     Parameters
@@ -131,7 +101,7 @@ class ResNet1d(nn.Module):
            on Computer Vision and Pattern Recognition (CVPR), 2016, pp. 770-778. https://arxiv.org/pdf/1512.03385.pdf
     """
 
-    def __init__(self, input_dim, blocks_dim, n_classes, kernel_size=17, dropout_rate=0.8, mlp_output=2):
+    def __init__(self, input_dim, blocks_dim, n_classes, kernel_size=17, dropout_rate=0.8):
         super(ResNet1d, self).__init__()
         # First layers
         n_filters_in, n_filters_out = input_dim[0], blocks_dim[0][0]
@@ -154,16 +124,11 @@ class ResNet1d(nn.Module):
 
         # Linear layer
         n_filters_last, n_samples_last = blocks_dim[-1]
-        last_layer_dim = n_filters_last * n_samples_last + mlp_output
+        last_layer_dim = n_filters_last * n_samples_last
         self.lin = nn.Linear(last_layer_dim, n_classes)
         self.n_blk = len(blocks_dim)
 
-        # MLP that will process tabular data
-        self.mlp_output = mlp_output
-        if mlp_output > 0:
-            self.mlp = Mlp(in_channels=2, hidden_size=8, out_channels=mlp_output, dropout=0.2)
-
-    def forward(self, x, t=None):
+    def forward(self, x):
         """Implement ResNet1d forward propagation"""
         # First layers
         x = self.conv1(x)
@@ -177,12 +142,6 @@ class ResNet1d(nn.Module):
         # Flatten array
         x = x.view(x.size(0), -1)
 
-        # run the tabular data thru the MLP if it's given
-        if self.mlp_output > 0 and t is not None:
-            t = self.mlp(t)
-            x = torch.cat((x, t), 1)
-
         # Fully conected layer
         x = self.lin(x)
         return x
-

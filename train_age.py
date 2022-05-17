@@ -2,20 +2,57 @@ import json
 import torch
 import os
 from tqdm import tqdm
-from resnet import ResNet1d
+from resnet_unmodified import ResNet1d
 from dataloader import BatchDataloader
-from torch.utils.data import DataLoader
-import sys
-sys.path.append(r"C:\Users\dingyi.zhang\Documents\DeepLearningECG\dataset")
-from CLSA_dataset import CLSA
 import torch.optim as optim
 import numpy as np
+import h5py
+import pandas as pd
+import argparse
+from warnings import warn
+from dataloader import CODE_15
 
 
-def compute_loss(ages, pred_ages, weights):         # this looks like a version of MSE loss
+def compute_loss(ages, pred_ages, weights):
     diff = ages.flatten() - pred_ages.flatten()
     loss = torch.sum(weights.flatten() * diff * diff)
     return loss
+
+
+def compute_weights(ages, max_weight=np.inf):
+    _, inverse, counts = np.unique(ages, return_inverse=True, return_counts=True)
+    weights = 1 / counts[inverse]
+    normalized_weights = weights / sum(weights)
+    w = len(ages) * normalized_weights
+    # Truncate weights to a maximum
+    if max_weight < np.inf:
+        w = np.minimum(w, max_weight)
+        w = len(ages) * w / sum(w)
+    return w
+
+def load_all_h5py():
+    path = r'C:\Users\dingyi.zhang\Downloads\CODE-15%'
+    files = os.listdir(path)[1:]
+    numbers = []
+    for f in files:
+        numbers.append(int(f.split('_')[1].split('.')[0][4:]))
+    c = list(zip(files, numbers))
+    c = sorted(c, key=lambda x: x[1])
+    files, numbers = zip(*c)
+
+    print("Loading all h5py datasets...")
+    started = False
+    for f in tqdm(files):
+        if '.hdf5' in f:
+            fpath = os.path.join(path, f)
+            with h5py.File(fpath, mode='r') as f:
+                if not started:
+                    all_data = np.array(f['tracings'])
+                    started = True
+                else:
+                    data = np.array(f['tracings'])
+                    all_data = np.concatenate((all_data, data), axis=0)
+    return all_data
 
 
 def train(ep, dataload):
@@ -25,28 +62,22 @@ def train(ep, dataload):
     train_desc = "Epoch {:2d}: train - Loss: {:.6f}"
     train_bar = tqdm(initial=0, leave=True, total=len(dataload),
                      desc=train_desc.format(ep, 0, 0), position=0)
-    for batch in dataload:
-        traces = batch[0]
-        targets = batch[args.pred_target]
-        weights = batch[7]
-        ages = batch[6]
-        sexes = batch[9]
-        tabular = torch.stack((ages, sexes), 1)
-
-        traces, targets, weights, tabular = traces.to(device), targets.to(device), weights.to(device), tabular.to(device)
+    for traces, ages, weights in dataload:
+        traces = traces.transpose(1, 2)
+        traces, ages, weights = traces.to(device), ages.to(device), weights.to(device)
         # Reinitialize grad
         model.zero_grad()
         # Send to device
         # Forward pass
         pred_ages = model(traces)
-        loss = compute_loss(targets, pred_ages, weights)
+        loss = compute_loss(ages, pred_ages, weights)
         # Backward pass
         loss.backward()
         # Optimize
         optimizer.step()
         # Update
         bs = len(traces)
-        total_loss += loss.detach().cpu().numpy()
+        total_loss += loss.item()
         n_entries += bs
         # Update train bar
         train_bar.desc = train_desc.format(ep, total_loss / n_entries)
@@ -62,23 +93,17 @@ def eval(ep, dataload):
     eval_desc = "Epoch {:2d}: valid - Loss: {:.6f}"
     eval_bar = tqdm(initial=0, leave=True, total=len(dataload),
                     desc=eval_desc.format(ep, 0, 0), position=0)
-    for batch in dataload:
-        traces = batch[0]
-        targets = batch[args.pred_target]
-        weights = batch[7]
-        ages = batch[6]
-        sexes = batch[9]
-        tabular = torch.stack((ages, sexes), 1)
-
-        traces, targets, weights, tabular = traces.to(device), targets.to(device), weights.to(device), tabular.to(device)
+    for traces, ages, weights in dataload:
+        traces = traces.transpose(1, 2)
+        traces, ages, weights = traces.to(device), ages.to(device), weights.to(device)
         with torch.no_grad():
             # Forward pass
             pred_ages = model(traces)
-            loss = compute_loss(targets, pred_ages, weights)
+            loss = compute_loss(ages, pred_ages, weights)
             # Update outputs
             bs = len(traces)
             # Update ids
-            total_loss += loss.detach().cpu().numpy()
+            total_loss += loss.item()
             n_entries += bs
             # Print result
             eval_bar.desc = eval_desc.format(ep, total_loss / n_entries)
@@ -88,15 +113,11 @@ def eval(ep, dataload):
 
 
 if __name__ == "__main__":
-    import pandas as pd
-    import argparse
-    from warnings import warn
-
     # Arguments that will be saved in config file
     parser = argparse.ArgumentParser(add_help=True,
                                      description='Train model to predict rage from the raw ecg tracing.')
-    parser.add_argument('--epochs', type=int, default=140,
-                        help='maximum number of epochs (default: 140)')
+    parser.add_argument('--epochs', type=int, default=70,
+                        help='maximum number of epochs (default: 70)')
     parser.add_argument('--seed', type=int, default=2,
                         help='random seed for number generator (default: 2)')
     parser.add_argument('--sample_freq', type=int, default=400,
@@ -136,47 +157,75 @@ if __name__ == "__main__":
                         help='column with the ids in csv file.')
     parser.add_argument('--device', type=str, default='cuda:0',
                         help='use cuda for computations. (default: False)')
-    parser.add_argument('--n_valid', type=int, default=100,
+    parser.add_argument('--n_valid', type=int, default=50000,
                         help='the first `n_valid` exams in the hdf will be for validation.'
                              'The rest is for training')
-    parser.add_argument('--pred_target', type=int, default=1,
-                        help='Index of the torch dataloader output to use for target.'
-                        '1 for FI52 (default), 5 for BPM, 6 for age, 8 for FI39'
-                        'MUST CHANGE THE WEIGHT CALCULATION IN DATASET TOO!')
-    parser.add_argument('--run_name', type=str, default='default')
-
+    parser.add_argument('--path_to_traces', type=str, default=r'C:\Users\dingyi.zhang\Downloads\CODE-15%\exams_part0.hdf5',
+                        help='path to file containing ECG traces')
+    parser.add_argument('--path_to_csv', type=str, default=r'C:\Users\dingyi.zhang\Downloads\CODE-15%\exams.csv',
+                        help='path to csv file containing attributes.')
     args, unk = parser.parse_known_args()
     # Check for unknown options
     if unk:
         warn("Unknown arguments:" + str(unk) + ".")
 
     torch.manual_seed(args.seed)
+    print(args)
     # Set device
     device = torch.device(args.device)
+    folder = args.folder
+
+    # Generate output folder if needed
+    if not os.path.exists(args.folder):
+        os.makedirs(args.folder)
+    # Save config file
+    with open(os.path.join(args.folder, 'args.json'), 'w') as f:
+        json.dump(vars(args), f, indent='\t')
 
     tqdm.write("Building data loaders...")
-    train_dataset = CLSA(start=0, end=25000)
-    valid_dataset = CLSA(start=25000, end=27500)
+    # Get csv data
+    # df = pd.read_csv(args.path_to_csv, index_col=args.ids_col)
+    # ages = df[args.age_col]
+    # Get h5 data
+    # traces = load_all_h5py()
+    # f = h5py.File(args.path_to_traces, 'r')
+    # traces = f[args.traces_dset]
+    # if args.ids_dset:
+    #     h5ids = f[args.ids_dset]
+    #     df = df.reindex(h5ids, fill_value=False, copy=True)
+    # Train/ val split
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size)
-    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size)
+    traces, ages = CODE_15()
+    valid_mask = np.arange(len(ages)) <= args.n_valid
+    train_mask = ~valid_mask
+    # weights
+    weights = compute_weights(ages)
+    # Dataloader
+    train_loader = BatchDataloader(traces, ages, weights, bs=args.batch_size, mask=train_mask)
+    valid_loader = BatchDataloader(traces, ages, weights, bs=args.batch_size, mask=valid_mask)
+    tqdm.write("Done!")
 
+    tqdm.write("Define model...")
     N_LEADS = 12  # the 12 leads
     N_CLASSES = 1  # just the age
     model = ResNet1d(input_dim=(N_LEADS, args.seq_length),
                      blocks_dim=list(zip(args.net_filter_size, args.net_seq_lengh)),
                      n_classes=N_CLASSES,
                      kernel_size=args.kernel_size,
-                     dropout_rate=args.dropout_rate,
-                     mlp_output=0)
-    model.load_state_dict(torch.load(r'C:\Users\dingyi.zhang\Documents\ecg-age-prediction\checkpoints\CLSA_age_pred.pth')['model'])
+                     dropout_rate=args.dropout_rate)
+    # model = torch.nn.DataParallel(model)
     model.to(device=device)
+    tqdm.write("Done!")
 
+    tqdm.write("Define optimizer...")
     optimizer = optim.Adam(model.parameters(), args.lr)
+    tqdm.write("Done!")
 
+    tqdm.write("Define scheduler...")
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=args.patience,
                                                      min_lr=args.lr_factor * args.min_lr,
                                                      factor=args.lr_factor)
+    tqdm.write("Done!")
 
     tqdm.write("Training...")
     start_epoch = 0
@@ -193,7 +242,7 @@ if __name__ == "__main__":
                         'model': model.state_dict(),
                         'valid_loss': valid_loss,
                         'optimizer': optimizer.state_dict()},
-                       os.path.join(r'C:\Users\dingyi.zhang\Documents\ecg-age-prediction\checkpoints', args.run_name + '.pth'))
+                       os.path.join(folder, 'model.pth'))
             # Update best validation loss
             best_loss = valid_loss
         # Get learning rate
@@ -209,7 +258,7 @@ if __name__ == "__main__":
         # Save history
         history = history.append({"epoch": ep, "train_loss": train_loss,
                                   "valid_loss": valid_loss, "lr": learning_rate}, ignore_index=True)
-        history.to_csv(os.path.join(r"C:\Users\dingyi.zhang\Documents\ecg-age-prediction", 'history.csv'), index=False)
+        history.to_csv(os.path.join(folder, 'history.csv'), index=False)
         # Update learning rate
         scheduler.step(valid_loss)
     tqdm.write("Done!")
